@@ -1,0 +1,12 @@
+flask
+flask-cors
+flask-sqlalchemy
+pymupdf
+torch
+transformers
+sentencepiece
+sacremoses
+ctranslate2
+ebooklib
+celery
+redis

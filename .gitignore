@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs
+*.log
+flask.log
+
+# Databases & Celery
+*.sqlite
+instance/
+!instance/.gitkeep
+
+# Project specific data
+uploads/
+outputs/
+.DS_Store
+idee.txt
+idée.txt
+
+# Models (Optional: ignore if you prefer downloading them separately)
+model_ct2_en_fr/
+
+# OS junk
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
