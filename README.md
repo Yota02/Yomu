@@ -51,6 +51,13 @@ Il combine un backend Flask propulsé par l'IA (Helsinki-NLP ou CTranslate2) et 
    python run_backend.py
    ```
 
+### Lancement Rapide (Backend + Frontend)
+
+Pour lancer les deux services simultanément avec une seule commande :
+```bash
+python run_yomu.py
+```
+
 ### Frontend (React)
 
 1. **Installation :**
