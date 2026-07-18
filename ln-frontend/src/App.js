@@ -48,7 +48,23 @@ function App() {
   });
   const [step, setStep] = useState(() => {
     const saved = localStorage.getItem('ln_step');
-    return saved ? Number(saved) : 1;
+    const savedStep = saved ? Number(saved) : 1;
+    const savedQueue = localStorage.getItem('ln_queue');
+    if (savedStep === 3 && savedQueue) {
+      try {
+        const parsed = JSON.parse(savedQueue);
+        const hasTranslating = parsed.some(
+          item => item.status !== 'idle' && item.status !== 'uploading' && item.status === 'translating'
+        );
+        const hasCompleted = parsed.some(
+          item => item.status !== 'idle' && item.status !== 'uploading' && item.status === 'completed'
+        );
+        if (!hasTranslating && hasCompleted) {
+          return 4;
+        }
+      } catch (e) {}
+    }
+    return savedStep;
   });
   
   const [glossary, setGlossary] = useState([]);
@@ -436,14 +452,33 @@ function App() {
 
       eventSource.onerror = () => {
         console.error("EventSource failed for taskId: " + id);
-        setQueue(prevQueue => {
-          const nextQueue = [...prevQueue];
-          nextQueue[index].status = 'error';
-          nextQueue[index].errorMsg = "Connexion perdue avec le serveur de progression";
-          return nextQueue;
-        });
         eventSource.close();
-        resolve();
+        axios.get(`${API_BASE}/page/${id}/1?translated=true`, { timeout: 5000 })
+          .then(() => {
+            setQueue(prevQueue => {
+              const nextQueue = [...prevQueue];
+              nextQueue[index].status = 'completed';
+              nextQueue[index].downloadUrl = `${API_BASE}/download/${id}`;
+              nextQueue[index].epubUrl = `${API_BASE}/download_epub/${id}`;
+              nextQueue[index].progress = {
+                current: nextQueue[index].totalPages || 0,
+                total: nextQueue[index].totalPages || 0,
+                status: 'completed'
+              };
+              return nextQueue;
+            });
+          })
+          .catch(() => {
+            setQueue(prevQueue => {
+              const nextQueue = [...prevQueue];
+              nextQueue[index].status = 'error';
+              nextQueue[index].errorMsg = "Connexion perdue avec le serveur de progression";
+              return nextQueue;
+            });
+          })
+          .finally(() => {
+            resolve();
+          });
       };
     });
   };
@@ -591,9 +626,6 @@ function App() {
           setTotalPages(firstCompleted.totalPages);
           setPreviewPage(1);
           setStep(4);
-        } else {
-          alert("Aucun fichier n'a pu être traduit avec succès.");
-          setStep(1);
         }
       }
     }

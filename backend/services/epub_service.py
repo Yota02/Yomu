@@ -95,8 +95,6 @@ def build_image_epub(
             lang="fr",
         )
         page_xhtml.content = (
-            f'<?xml version="1.0" encoding="UTF-8"?>\n'
-            f"<!DOCTYPE html>\n"
             f'<html xmlns="http://www.w3.org/1999/xhtml">\n'
             f"<head><title>Page {i + 1}</title></head>\n"
             f'<body><img src="../{img_filename}" alt="Page {i + 1}"/></body>\n'

@@ -132,7 +132,11 @@ def epub_preview(task_id):
     quality = request.args.get("quality", 85, type=int)
     dpi = request.args.get("dpi", 72, type=int)
     grayscale = request.args.get("grayscale", "0") == "1"
-    page_num = request.args.get("page", "auto")
+    page_str = request.args.get("page", "auto")
+    if page_str == "auto":
+        page_num = "auto"
+    else:
+        page_num = request.args.get("page", type=int)
 
     pdf_path = os.path.abspath(
         os.path.join(Config.OUTPUT_FOLDER, f"{task_id}_translated.pdf")
@@ -552,6 +556,23 @@ def get_progress(task_id):
                     if task_id in tasks:
                         celery_state_detected = False
                     else:
+                        # Check if the translation output already exists (completed before restart)
+                        output_path = os.path.join(
+                            Config.OUTPUT_FOLDER, f"{task_id}_translated.pdf"
+                        )
+                        if os.path.exists(output_path):
+                            trans = Translation.query.filter_by(task_id=task_id).first()
+                            total = trans.total_pages if trans else 0
+                            data = {
+                                "status": "completed",
+                                "current_page": total,
+                                "total_pages": total,
+                                "download_url": f"/download/{task_id}",
+                                "epub_url": f"/download_epub/{task_id}",
+                            }
+                            yield f"data: {json.dumps(data)}\n\n"
+                            celery_state_detected = True
+                            break
                         data = {
                             "status": "starting",
                             "current_page": 0,
