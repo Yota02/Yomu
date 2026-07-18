@@ -18,7 +18,8 @@ import {
   AlertCircle,
   Play,
   History,
-  ArrowLeft
+  ArrowLeft,
+  Tablet
 } from 'lucide-react';
 import './App.css';
 
@@ -26,10 +27,29 @@ const API_BASE = 'http://localhost:5001';
 
 function App() {
   // File queue: array of objects { id, file, name, size, status, taskId, terms, totalPages, progress, downloadUrl, errorMsg }
-  const [queue, setQueue] = useState([]);
-  const [activeFileIndex, setActiveFileIndex] = useState(0);
-  const [taskId, setTaskId] = useState(null);
-  const [step, setStep] = useState(1); // 0: History, 1: Upload/Queue, 2: Glossary, 3: Translating, 4: Reading Room
+  const [queue, setQueue] = useState(() => {
+    const saved = localStorage.getItem('ln_queue');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return parsed.filter(item => item.status !== 'idle' && item.status !== 'uploading');
+      } catch (e) {
+        return [];
+      }
+    }
+    return [];
+  });
+  const [activeFileIndex, setActiveFileIndex] = useState(() => {
+    const saved = localStorage.getItem('ln_active_file_index');
+    return saved ? Number(saved) : 0;
+  });
+  const [taskId, setTaskId] = useState(() => {
+    return localStorage.getItem('ln_task_id') || null;
+  });
+  const [step, setStep] = useState(() => {
+    const saved = localStorage.getItem('ln_step');
+    return saved ? Number(saved) : 1;
+  });
   
   const [glossary, setGlossary] = useState([]);
   const [protagonistGender, setProtagonistGender] = useState('none'); // 'none', 'male', 'female'
@@ -37,14 +57,32 @@ function App() {
   const [loading, setLoading] = useState(false);
 
   // States for the page-by-page display
-  const [totalPages, setTotalPages] = useState(1);
-  const [previewPage, setPreviewPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(() => {
+    const saved = localStorage.getItem('ln_total_pages');
+    return saved ? Number(saved) : 1;
+  });
+  const [previewPage, setPreviewPage] = useState(() => {
+    const saved = localStorage.getItem('ln_preview_page');
+    return saved ? Number(saved) : 1;
+  });
   const [zoomLevel, setZoomLevel] = useState(1);
   const [readerLayout, setReaderLayout] = useState('side-by-side'); // 'side-by-side', 'original', 'translated'
 
   const [history, setHistory] = useState([]);
   const [selectedTask, setSelectedTask] = useState(null);
   const [backendConnected, setBackendConnected] = useState(null);
+  const [ereaders, setEreaders] = useState([]);
+  const [selectedEreader, setSelectedEreader] = useState(null);
+  const [showEreaderMenu, setShowEreaderMenu] = useState(false);
+  const [ereaderSending, setEreaderSending] = useState(null);
+  const [ereaderModal, setEreaderModal] = useState(null);
+  const [compressQuality, setCompressQuality] = useState(85);
+  const [compressDpi, setCompressDpi] = useState(72);
+  const [compressGrayscale, setCompressGrayscale] = useState(false);
+  const [compressedEpubResult, setCompressedEpubResult] = useState(null);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const [previewSamplePage, setPreviewSamplePage] = useState(null);
+  const [estimatedSize, setEstimatedSize] = useState(null);
 
   const checkBackendConnection = async () => {
     try {
@@ -55,9 +93,87 @@ function App() {
     }
   };
 
+  const detectEreaders = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/ereaders`);
+      setEreaders(res.data);
+      if (res.data.length > 0 && !selectedEreader) {
+        setSelectedEreader(res.data[0]);
+      }
+    } catch (err) {
+      console.error("Erreur de détection des liseuses:", err);
+    }
+  };
+
+  const openEreaderModal = (taskId, fileName, totalPages) => {
+    const pp = totalPages <= 10 ? totalPages : Math.min(totalPages, Math.max(11, Math.floor(totalPages * 0.4)));
+    setPreviewSamplePage(pp);
+    setCompressedEpubResult(null);
+    setEstimatedSize(null);
+    setCompressQuality(85);
+    setCompressDpi(72);
+    setCompressGrayscale(false);
+    setEreaderModal({ taskId, fileName, totalPages });
+    fetchEstimate(taskId, 85, 72, false);
+  };
+
+  const fetchEstimate = async (taskId, quality, dpi, grayscale) => {
+    try {
+      const res = await axios.get(`${API_BASE}/epub/estimate/${taskId}`, {
+        params: { quality, dpi, grayscale: grayscale ? "1" : "0" },
+      });
+      setEstimatedSize(res.data.estimated_size);
+    } catch (err) {
+      console.error("Erreur d'estimation:", err);
+    }
+  };
+
+  const doCompress = async () => {
+    if (!ereaderModal) return;
+    setIsCompressing(true);
+    try {
+      const res = await axios.post(`${API_BASE}/epub/compress/${ereaderModal.taskId}`, {
+        quality: compressQuality,
+        dpi: compressDpi,
+        grayscale: compressGrayscale,
+      });
+      setCompressedEpubResult(res.data);
+    } catch (err) {
+      alert("Erreur de compression: " + (err.response?.data?.error || err.message));
+    }
+    setIsCompressing(false);
+  };
+
+  const sendToEreader = async (taskId, compressed = false) => {
+    if (!selectedEreader || ereaders.length === 0) {
+      await detectEreaders();
+      if (ereaders.length === 0 && !selectedEreader) {
+        alert("Aucune liseuse détectée. Veuillez connecter une liseuse.");
+        return;
+      }
+    }
+    setEreaderSending(taskId);
+    try {
+      await axios.post(`${API_BASE}/ereaders/send`, {
+        ereader_path: selectedEreader.path,
+        task_id: taskId,
+        compressed: compressed,
+      });
+      alert("Fichier envoyé à la liseuse avec succès !");
+      setEreaderModal(null);
+    } catch (err) {
+      alert("Erreur lors de l'envoi à la liseuse: " + (err.response?.data?.error || err.message));
+    }
+    setEreaderSending(null);
+  };
+
   useEffect(() => {
     checkBackendConnection();
-    const interval = setInterval(checkBackendConnection, 5000);
+    detectEreaders();
+    const interval = setInterval(() => {
+      checkBackendConnection();
+      detectEreaders();
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -415,6 +531,74 @@ function App() {
     });
   };
 
+  useEffect(() => {
+    localStorage.setItem('ln_queue', JSON.stringify(queue));
+  }, [queue]);
+
+  useEffect(() => {
+    localStorage.setItem('ln_active_file_index', activeFileIndex);
+  }, [activeFileIndex]);
+
+  useEffect(() => {
+    if (taskId) {
+      localStorage.setItem('ln_task_id', taskId);
+    } else {
+      localStorage.removeItem('ln_task_id');
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    localStorage.setItem('ln_step', step);
+  }, [step]);
+
+  useEffect(() => {
+    localStorage.setItem('ln_total_pages', totalPages);
+  }, [totalPages]);
+
+  useEffect(() => {
+    localStorage.setItem('ln_preview_page', previewPage);
+  }, [previewPage]);
+
+  useEffect(() => {
+    // Resume tracking for any active translations in the queue
+    const savedQueue = localStorage.getItem('ln_queue');
+    if (savedQueue) {
+      try {
+        const parsedQueue = JSON.parse(savedQueue);
+        parsedQueue.forEach((item, index) => {
+          if (item.status === 'translating') {
+            console.log("Resuming tracking for task:", item.taskId);
+            trackSingleProgress(index, item.taskId);
+          }
+        });
+      } catch (err) {
+        console.error("Error resuming translation tracking:", err);
+      }
+    }
+  }, []); // Run once on mount
+
+  useEffect(() => {
+    if (step === 3 && queue.length > 0) {
+      const isTranslating = queue.some(item => item.status === 'translating');
+      if (!isTranslating) {
+        const completedItems = queue.filter(item => item.status === 'completed');
+        if (completedItems.length > 0) {
+          const firstCompletedIdx = queue.findIndex(item => item.status === 'completed');
+          const firstCompleted = queue[firstCompletedIdx];
+          
+          setActiveFileIndex(firstCompletedIdx);
+          setTaskId(firstCompleted.taskId);
+          setTotalPages(firstCompleted.totalPages);
+          setPreviewPage(1);
+          setStep(4);
+        } else {
+          alert("Aucun fichier n'a pu être traduit avec succès.");
+          setStep(1);
+        }
+      }
+    }
+  }, [queue, step]);
+
   const activeTranslationItem = queue.find(item => item.status === 'translating');
 
   return (
@@ -432,6 +616,22 @@ function App() {
                   <span className="status-text">{backendConnected ? "Connecté" : "Hors ligne"}</span>
                 </div>
               )}
+              <div className="ereader-status-wrapper">
+                <div className={`connection-status ${ereaders.length > 0 ? 'connected' : 'disconnected'}`} onClick={() => { detectEreaders(); setShowEreaderMenu(!showEreaderMenu); }} style={{ cursor: 'pointer' }} title={ereaders.length > 0 ? `${ereaders.length} liseuse(s) détectée(s)` : "Aucune liseuse détectée"}>
+                  <Tablet size={12} />
+                  <span className="status-text">{ereaders.length > 0 ? (selectedEreader ? selectedEreader.name : `${ereaders.length}`) : "Liseuse"}</span>
+                </div>
+                {showEreaderMenu && ereaders.length > 0 && (
+                  <div className="ereader-dropdown">
+                    {ereaders.map((er, idx) => (
+                      <div key={idx} className={`ereader-option ${selectedEreader?.path === er.path ? 'active' : ''}`} onClick={() => { setSelectedEreader(er); setShowEreaderMenu(false); }}>
+                        <Tablet size={14} />
+                        <span>{er.name} ({er.path})</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
             <div className="brand-subtitle">Traduction intelligente de Light Novels avec glossaire global unifié</div>
           </div>
@@ -570,6 +770,14 @@ function App() {
                           >
                             <BookOpen size={18} />
                           </a>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); openEreaderModal(item.task_id, item.filename, item.total_pages); }} 
+                            className="btn btn-secondary btn-icon" 
+                            title="Envoyer à la liseuse"
+                            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                          >
+                            <Tablet size={18} />
+                          </button>
                         </>
                       )}
                       {item.original_url && (
@@ -1172,6 +1380,11 @@ function App() {
                     Non disponible
                   </button>
                 )}
+                {queue[activeFileIndex]?.taskId && (
+                  <button onClick={() => openEreaderModal(queue[activeFileIndex].taskId, queue[activeFileIndex].name, queue[activeFileIndex].totalPages)} className="btn btn-secondary" style={{ padding: '8px 16px', fontSize: '13px', borderRadius: '6px' }}>
+                    <Tablet size={16} /> Liseuse
+                  </button>
+                )}
                 <button 
                   className="btn btn-secondary" 
                   style={{ padding: '8px 16px', fontSize: '13px', borderRadius: '6px' }}
@@ -1252,6 +1465,146 @@ function App() {
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {ereaderModal && (
+        <div className="modal-overlay" onClick={() => setEreaderModal(null)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3><Tablet size={20} /> Envoyer à la liseuse</h3>
+              <button className="modal-close" onClick={() => setEreaderModal(null)}>✕</button>
+            </div>
+
+            <div className="modal-body">
+              <p className="modal-filename">{ereaderModal.fileName}</p>
+
+              <div className="preview-comparison">
+                <div className="preview-col">
+                  <div className="preview-label">Original (100dpi, 95%)</div>
+                  <img
+                    src={`${API_BASE}/epub/preview/${ereaderModal.taskId}?quality=95&dpi=100&grayscale=0&page=${previewSamplePage}`}
+                    alt="Original"
+                    className="preview-img"
+                  />
+                </div>
+                <div className="preview-col">
+                  <div className="preview-label">Compressé ({compressDpi}dpi, {compressQuality}%){compressGrayscale ? ', Gris' : ''}</div>
+                  <img
+                    key={`comp-${compressQuality}-${compressDpi}-${compressGrayscale}`}
+                    src={`${API_BASE}/epub/preview/${ereaderModal.taskId}?quality=${compressQuality}&dpi=${compressDpi}&grayscale=${compressGrayscale ? "1" : "0"}&page=${previewSamplePage}`}
+                    alt="Compressé"
+                    className="preview-img"
+                  />
+                </div>
+              </div>
+
+              <div className="size-comparison-bar">
+                <div className="size-item">
+                  <span className="size-label">Original</span>
+                  <span className="size-value">~{estimatedSize ? (estimatedSize / 1024 / 1024).toFixed(1) : '?'} Mo</span>
+                </div>
+                <div className="size-item compressed">
+                  <span className="size-label">Compressé</span>
+                  <span className="size-value">
+                    {compressedEpubResult
+                      ? (compressedEpubResult.compressed_size / 1024 / 1024).toFixed(1)
+                      : estimatedSize
+                        ? (estimatedSize / 1024 / 1024).toFixed(1)
+                        : '?'} Mo
+                    {compressedEpubResult && compressedEpubResult.reduction_pct > 1 && (
+                      <span className="reduction-badge">-{compressedEpubResult.reduction_pct}%</span>
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              <div className="compress-settings">
+                <div className="setting-row">
+                  <label>Qualité JPEG</label>
+                  <input
+                    type="range"
+                    min="60"
+                    max="95"
+                    step="5"
+                    value={compressQuality}
+                    onChange={e => {
+                      const v = Number(e.target.value);
+                      setCompressQuality(v);
+                      fetchEstimate(ereaderModal.taskId, v, compressDpi, compressGrayscale);
+                    }}
+                    className="quality-slider"
+                  />
+                  <span className="setting-value">{compressQuality}%</span>
+                </div>
+                <div className="setting-row">
+                  <label>DPI</label>
+                  <div className="dpi-buttons">
+                    {[72, 100, 150].map(d => (
+                      <button
+                        key={d}
+                        className={`dpi-btn ${compressDpi === d ? 'active' : ''}`}
+                        onClick={() => {
+                          setCompressDpi(d);
+                          fetchEstimate(ereaderModal.taskId, compressQuality, d, compressGrayscale);
+                        }}
+                      >{d}</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="setting-row">
+                  <label>Couleur</label>
+                  <div className="grayscale-toggle">
+                    <button
+                      className={`toggle-btn ${!compressGrayscale ? 'active' : ''}`}
+                      onClick={() => {
+                        setCompressGrayscale(false);
+                        fetchEstimate(ereaderModal.taskId, compressQuality, compressDpi, false);
+                      }}
+                    >Couleur</button>
+                    <button
+                      className={`toggle-btn ${compressGrayscale ? 'active' : ''}`}
+                      onClick={() => {
+                        setCompressGrayscale(true);
+                        fetchEstimate(ereaderModal.taskId, compressQuality, compressDpi, true);
+                      }}
+                    >Niveaux de gris</button>
+                  </div>
+                </div>
+              </div>
+
+              {compressedEpubResult ? (
+                <div className="compress-result">
+                  <div className="result-row">
+                    <span>Fichier compressé</span>
+                    <strong>{(compressedEpubResult.compressed_size / 1024 / 1024).toFixed(1)} Mo</strong>
+                    {compressedEpubResult.original_size && (
+                      <span className="reduction-badge">
+                        -{compressedEpubResult.reduction_pct}% ({(compressedEpubResult.original_size / 1024 / 1024).toFixed(1)} Mo → {(compressedEpubResult.compressed_size / 1024 / 1024).toFixed(1)} Mo)
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => sendToEreader(ereaderModal.taskId, true)}
+                    className="btn btn-success"
+                    disabled={ereaderSending === ereaderModal.taskId}
+                    style={{ width: '100%', marginTop: '12px' }}
+                  >
+                    <Tablet size={18} /> {ereaderSending === ereaderModal.taskId ? 'Envoi...' : 'Envoyer à la liseuse'}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={doCompress}
+                  className="btn btn-primary"
+                  disabled={isCompressing}
+                  style={{ width: '100%', marginTop: '16px' }}
+                >
+                  {isCompressing ? 'Compression en cours...' : 'Générer l\'EPUB avec ces réglages'}
+                </button>
+              )}
             </div>
           </div>
         </div>

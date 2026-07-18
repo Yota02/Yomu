@@ -2,6 +2,7 @@ import os
 import socket
 import re
 import warnings
+import time
 from datetime import datetime
 
 import fitz
@@ -56,7 +57,9 @@ if is_redis_available():
     BROKER_URL = "redis://localhost:6379/0"
     BACKEND_URL = "redis://localhost:6379/0"
 else:
-    print("[Celery] Redis n'est pas accessible. Utilisation de SQLite comme broker de secours.")
+    print(
+        "[Celery] Redis n'est pas accessible. Utilisation de SQLite comme broker de secours."
+    )
     BROKER_URL = f"sqla+sqlite:///{os.path.join(PROJECT_ROOT, 'celery_broker.sqlite')}"
     BACKEND_URL = f"db+sqlite:///{os.path.join(PROJECT_ROOT, 'celery_results.sqlite')}"
 
@@ -85,22 +88,47 @@ def translate_and_build_pdf_task(
     translation_mode="fast",
 ):
     ensure_storage_dirs()
+    total_start = time.time()
     print(
-        "[Celery Worker] Début de la traduction pour la tâche "
-        f"{task_id} (Genre: {protagonist_gender}, Mode: {translation_mode})"
+        "[Celery Worker] Debut traduction tache="
+        f"{task_id} mode={translation_mode} genre={protagonist_gender} "
+        f"fichier={os.path.basename(filepath)}"
     )
-    self.update_state(state="PROGRESS", meta={"status": "starting", "current_page": 0, "total_pages": 0})
+    self.update_state(
+        state="PROGRESS",
+        meta={"status": "starting", "current_page": 0, "total_pages": 0},
+    )
+    session = Session()
+    try:
+        trans = session.query(Translation).filter_by(task_id=task_id).first()
+        if trans:
+            trans.status = "processing"
+            session.commit()
+    except Exception as e:
+        print(f"[Celery Worker] Erreur maj db start: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
     try:
         doc = fitz.open(filepath)
         total_pages = len(doc)
-        pages_to_translate = min(limit_pages, total_pages) if limit_pages is not None else total_pages
+        pages_to_translate = (
+            min(limit_pages, total_pages) if limit_pages is not None else total_pages
+        )
+        print(
+            f"[Celery Worker] PDF ouvert: {total_pages} pages total, "
+            f"{pages_to_translate} a traduire"
+        )
 
+        model_start = time.time()
         if translation_mode == "fast":
-            tokenizer, ct2_model = get_ct2_model()
-            device = "cpu"
+            tokenizer, ct2_model, device = get_ct2_model()
         else:
             tokenizer, model, device = get_translation_model()
+        print(
+            f"[Celery Worker] Modele charge sur {device} en {time.time() - model_start:.2f}s"
+        )
 
         all_translated_paragraphs = []
         original_filename = os.path.basename(filepath).replace(".pdf", "")
@@ -135,6 +163,7 @@ def translate_and_build_pdf_task(
 
             translated_map = {}
             if texts_to_translate:
+                tr_start = time.time()
                 if translation_mode == "fast":
                     source_tokens_list = [
                         tokenizer.convert_ids_to_tokens(tokenizer.encode(text))
@@ -157,7 +186,14 @@ def translate_and_build_pdf_task(
                     ).to(device)
                     with torch.no_grad():
                         outputs = model.generate(**inputs, max_length=512)
-                    translated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                    translated_texts = tokenizer.batch_decode(
+                        outputs, skip_special_tokens=True
+                    )
+                tr_elapsed = time.time() - tr_start
+                print(
+                    f"[Celery Worker] Page {page_num + 1}/{pages_to_translate} - "
+                    f"{len(texts_to_translate)} blocs traduits en {tr_elapsed:.2f}s"
+                )
 
                 for i, orig_idx in enumerate(to_translate_indices):
                     translated_text = translated_texts[i]
@@ -165,10 +201,16 @@ def translate_and_build_pdf_task(
 
                     for item in glossary:
                         if item.get("translation", "").strip():
-                            pattern = re.compile(re.escape(item["original"]), re.IGNORECASE)
-                            translated_text = pattern.sub(item["translation"], translated_text)
+                            pattern = re.compile(
+                                re.escape(item["original"]), re.IGNORECASE
+                            )
+                            translated_text = pattern.sub(
+                                item["translation"], translated_text
+                            )
 
-                    translated_text = apply_post_processing(original_text, translated_text)
+                    translated_text = apply_post_processing(
+                        original_text, translated_text
+                    )
 
                     translated_map[orig_idx] = translated_text
                     all_translated_paragraphs.append(translated_text)
@@ -227,7 +269,9 @@ def translate_and_build_pdf_task(
                 )
                 pix.save(temp_png_path)
             except Exception as render_err:
-                print(f"[Celery Worker] Erreur de rendu PNG page {page_num + 1}: {render_err}")
+                print(
+                    f"[Celery Worker] Erreur de rendu PNG page {page_num + 1}: {render_err}"
+                )
 
             self.update_state(
                 state="PROGRESS",
@@ -237,11 +281,38 @@ def translate_and_build_pdf_task(
                     "total_pages": pages_to_translate,
                 },
             )
-            print(f"[Celery Worker] Page {page_num + 1}/{pages_to_translate} traduite pour {task_id}")
+            print(
+                f"[Celery Worker] Page {page_num + 1}/{pages_to_translate} rendue pour {task_id}"
+            )
 
-            if self.request.called_directly is False and self.request.is_revoked:
+            if (page_num + 1) % 5 == 0 or (page_num + 1) == pages_to_translate:
+                session = Session()
+                try:
+                    trans = session.query(Translation).filter_by(task_id=task_id).first()
+                    if trans:
+                        trans.current_page = page_num + 1
+                        session.commit()
+                except Exception as e:
+                    print(f"[Celery Worker] Erreur maj db progress: {e}")
+                    session.rollback()
+                finally:
+                    session.close()
+
+            if self.request.called_directly is False and self.AsyncResult(task_id).state == "REVOKED":
                 print(f"[Celery Worker] Tache annulee pour {task_id}")
                 doc.close()
+                session = Session()
+                try:
+                    trans = session.query(Translation).filter_by(task_id=task_id).first()
+                    if trans:
+                        trans.status = "cancelled"
+                        trans.current_page = page_num + 1
+                        session.commit()
+                except Exception as e:
+                    print(f"[Celery Worker] Erreur maj db revoked: {e}")
+                    session.rollback()
+                finally:
+                    session.close()
                 return {
                     "status": "cancelled",
                     "current_page": page_num + 1,
@@ -252,9 +323,25 @@ def translate_and_build_pdf_task(
         doc.close()
 
         epub_path = output_path.replace(".pdf", ".epub")
-        create_epub_from_text(task_id, original_filename, all_translated_paragraphs, epub_path)
+        create_epub_from_text(
+            task_id, original_filename, all_translated_paragraphs, epub_path
+        )
 
         print(f"[Celery Worker] Traduction terminée pour la tâche {task_id}")
+
+        session = Session()
+        try:
+            trans = session.query(Translation).filter_by(task_id=task_id).first()
+            if trans:
+                trans.status = "completed"
+                trans.current_page = pages_to_translate
+                session.commit()
+        except Exception as e:
+            print(f"[Celery Worker] Erreur maj db completed: {e}")
+            session.rollback()
+        finally:
+            session.close()
+
         return {
             "status": "completed",
             "current_page": pages_to_translate,
@@ -265,5 +352,18 @@ def translate_and_build_pdf_task(
 
     except Exception as exc:
         print(f"[Celery Worker] Erreur dans la tâche {task_id}: {exc}")
-        self.update_state(state="FAILURE", meta={"status": "error", "message": str(exc)})
+        self.update_state(
+            state="FAILURE", meta={"status": "error", "message": str(exc)}
+        )
+        session = Session()
+        try:
+            trans = session.query(Translation).filter_by(task_id=task_id).first()
+            if trans:
+                trans.status = "error"
+                session.commit()
+        except Exception as e:
+            print(f"[Celery Worker] Erreur maj db error: {e}")
+            session.rollback()
+        finally:
+            session.close()
         raise

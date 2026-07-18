@@ -31,6 +31,10 @@ def translate_and_build_pdf_fallback(
     }
 
     translation_lock.acquire()
+    total_start = time.time()
+    print(
+        f"[Thread] Debut traduction tache={task_id} mode={translation_mode} fichier={os.path.basename(filepath)}"
+    )
     try:
         from flask import current_app
         from ..extensions import db
@@ -43,14 +47,22 @@ def translate_and_build_pdf_fallback(
 
         doc = fitz.open(filepath)
         total_pages = len(doc)
-        pages_to_translate = min(limit_pages, total_pages) if limit_pages is not None else total_pages
+        pages_to_translate = (
+            min(limit_pages, total_pages) if limit_pages is not None else total_pages
+        )
+        print(
+            f"[Thread] PDF ouvert: {total_pages} pages total, {pages_to_translate} a traduire"
+        )
 
+        model_start = time.time()
         if translation_mode == "fast":
-            tokenizer, ct2_model = get_ct2_model()
-            device = "cpu"
+            tokenizer, ct2_model, device = get_ct2_model()
         else:
             translation_model_lock.acquire()
             tokenizer, model, device = get_translation_model()
+        print(
+            f"[Thread] Modele charge sur {device} en {time.time() - model_start:.2f}s"
+        )
 
         all_translated_paragraphs = []
         original_filename = os.path.basename(filepath).replace(".pdf", "")
@@ -101,6 +113,7 @@ def translate_and_build_pdf_fallback(
 
             translated_map = {}
             if texts_to_translate:
+                tr_start = time.time()
                 if translation_mode == "fast":
                     source_tokens_list = [
                         tokenizer.convert_ids_to_tokens(tokenizer.encode(text))
@@ -123,7 +136,14 @@ def translate_and_build_pdf_fallback(
                     ).to(device)
                     with torch.no_grad():
                         outputs = model.generate(**inputs, max_length=512)
-                    translated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                    translated_texts = tokenizer.batch_decode(
+                        outputs, skip_special_tokens=True
+                    )
+                tr_elapsed = time.time() - tr_start
+                print(
+                    f"[Thread] Page {page_num + 1}/{pages_to_translate} - "
+                    f"{len(texts_to_translate)} blocs traduits en {tr_elapsed:.2f}s"
+                )
 
                 for i, orig_idx in enumerate(to_translate_indices):
                     translated_text = translated_texts[i]
@@ -131,10 +151,16 @@ def translate_and_build_pdf_fallback(
 
                     for item in glossary:
                         if item.get("translation", "").strip():
-                            pattern = re.compile(re.escape(item["original"]), re.IGNORECASE)
-                            translated_text = pattern.sub(item["translation"], translated_text)
+                            pattern = re.compile(
+                                re.escape(item["original"]), re.IGNORECASE
+                            )
+                            translated_text = pattern.sub(
+                                item["translation"], translated_text
+                            )
 
-                    translated_text = apply_post_processing(original_text, translated_text)
+                    translated_text = apply_post_processing(
+                        original_text, translated_text
+                    )
 
                     translated_map[orig_idx] = translated_text
                     all_translated_paragraphs.append(translated_text)
@@ -193,7 +219,9 @@ def translate_and_build_pdf_fallback(
                 )
                 pix.save(temp_png_path)
             except Exception as render_err:
-                print(f"Erreur de rendu de page temporaire {page_num + 1}: {render_err}")
+                print(
+                    f"Erreur de rendu de page temporaire {page_num + 1}: {render_err}"
+                )
 
             tasks[task_id] = {
                 "status": "processing",
@@ -213,7 +241,16 @@ def translate_and_build_pdf_fallback(
         doc.close()
 
         epub_path = output_path.replace(".pdf", ".epub")
-        create_epub_from_text(task_id, original_filename, all_translated_paragraphs, epub_path)
+        create_epub_from_text(
+            task_id, original_filename, all_translated_paragraphs, epub_path
+        )
+
+        elapsed = time.time() - total_start
+        print(
+            f"[Thread] Traduction terminee pour {task_id}: "
+            f"{pages_to_translate} pages en {elapsed:.1f}s "
+            f"({elapsed / max(pages_to_translate, 1):.1f}s/page)"
+        )
 
         with current_app.app_context():
             trans = Translation.query.filter_by(task_id=task_id).first()

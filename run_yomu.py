@@ -25,12 +25,20 @@ def run_yomu():
         # 1. Démarrer le Backend
         print("📂 Lancement du Backend Flask...")
         backend_proc = subprocess.Popen(
-            [python_exe, "run_backend.py"],
+            [python_exe, "-u", "run_backend.py"],
             cwd=root_dir
         )
         processes.append(backend_proc)
 
-        # 2. Démarrer le Frontend
+        # 2. Démarrer le Celery Worker
+        print("📂 Lancement du Celery Worker...")
+        celery_proc = subprocess.Popen(
+            [python_exe, "-u", "-m", "celery", "-A", "backend.celery_tasks.celery_app", "worker", "--loglevel=info", "--pool=solo"],
+            cwd=root_dir
+        )
+        processes.append(celery_proc)
+
+        # 3. Démarrer le Frontend
         print("📂 Lancement du Frontend React (cela peut prendre quelques secondes)...")
         # On utilise shell=True pour npm car c'est souvent un alias/script sous Windows
         frontend_proc = subprocess.Popen(

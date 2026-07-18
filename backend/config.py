@@ -18,5 +18,7 @@ class Config:
     SSE_IDLE_TIMEOUT_SECONDS = int(os.environ.get("SSE_IDLE_TIMEOUT_SECONDS", "900"))
     MAX_CONTENT_LENGTH = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
+    TRANSLATION_DEVICE = os.environ.get("TRANSLATION_DEVICE", "auto")
+
     UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, "uploads")
     OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "outputs")
